@@ -60,7 +60,9 @@ EOF
 }
 
 log() {
-    echo -e "$1" | tee -a "$LOG_FILE"
+    local msg="$1"
+    echo -e "$msg"
+    echo -e "$msg" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE"
 }
 
 header() {
@@ -350,7 +352,7 @@ log ""
 
 if $DRY_RUN; then
     log "  ${YELLOW}⚠  Режим отчёта — ничего не удалено.${NC}"
-    log "  ${YELLOW}   Запустите с флагом ${BOLD}--apply${NC}${YELLOW} для реальной очистки.${NC}"
+    log "  ${YELLOW}   Запустите с флагом ${BOLD}--apply${YELLOW} для реальной очистки.${NC}"
 else
     log "  ${GREEN}✓ Фактически освобождено на диске: $(human_size "$ACTUAL_FREED")${NC}"
     log "  ${GREEN}  (расчётно по операциям: $(human_size "$TOTAL_FREED"))${NC}"
