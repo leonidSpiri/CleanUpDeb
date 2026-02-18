@@ -596,7 +596,7 @@ else
         log "  ─────────────────────────────────────────────────"
         docker system df 2>/dev/null | while IFS= read -r line; do
             log "  ${line}"
-        done || true  # Prevent SIGPIPE from docker system df terminating script under set -euo pipefail
+        done || true  # Prevent pipeline errors from terminating script under set -euo pipefail
         log ""
         
         if ! $DRY_RUN; then
@@ -618,7 +618,7 @@ else
                 log "  ─────────────────────────────────────────────────"
                 docker system df 2>/dev/null | while IFS= read -r line; do
                     log "  ${line}"
-                done || true  # Prevent SIGPIPE from docker system df terminating script under set -euo pipefail
+                done || true  # Prevent pipeline errors from terminating script under set -euo pipefail
             else
                 log "  ${YELLOW}ℹ Очистка Docker пропущена пользователем.${NC}"
             fi
