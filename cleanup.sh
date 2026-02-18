@@ -390,13 +390,14 @@ else
                     local url="${REGISTRY_URL}/v2/_catalog"
                     local all_repos=""
                     local last=""
+                    local PAGE_SIZE=100
                     
                     while true; do
                         local request_url="$url"
                         if [[ -n "$last" ]]; then
-                            request_url="${url}?n=100&last=${last}"
+                            request_url="${url}?n=${PAGE_SIZE}&last=${last}"
                         else
-                            request_url="${url}?n=100"
+                            request_url="${url}?n=${PAGE_SIZE}"
                         fi
                         
                         local response=$(curl -s -u "${REGISTRY_USER}:${REGISTRY_PASS}" "$request_url" 2>/dev/null)
@@ -418,9 +419,9 @@ else
                         # Получить последний элемент для пагинации
                         last=$(echo "$repos" | tail -1)
                         
-                        # Проверить, есть ли ещё страницы (если вернулось меньше 100, то это последняя страница)
+                        # Проверить, есть ли ещё страницы (если вернулось меньше PAGE_SIZE, то это последняя страница)
                         local count=$(echo "$repos" | wc -l)
-                        if (( count < 100 )); then
+                        if (( count < PAGE_SIZE )); then
                             break
                         fi
                     done
@@ -455,10 +456,10 @@ else
                     
                     SELECTED_REPOS=""
                     
-                    if [[ "$selection_mode" =~ ^[Aa]ll$ ]]; then
+                    if [[ "$selection_mode" =~ ^[Aa][Ll][Ll]$ ]]; then
                         SELECTED_REPOS="$REPOSITORIES"
                         log "  ${YELLOW}⚠ Выбраны ВСЕ образы для удаления.${NC}"
-                    elif [[ "$selection_mode" =~ ^[Ss]elect$ ]]; then
+                    elif [[ "$selection_mode" =~ ^[Ss][Ee][Ll][Ee][Cc][Tt]$ ]]; then
                         echo -n "  Введите номера образов (например, 1,3,5 или 1-5): "
                         read -r selection
                         
@@ -466,7 +467,7 @@ else
                         SELECTED_REPOS=""
                         IFS=',' read -ra PARTS <<< "$selection"
                         for part in "${PARTS[@]}"; do
-                            part=$(echo "$part" | xargs) # trim whitespace
+                            part=$(echo "$part" | xargs) # убрать пробелы
                             if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
                                 # Диапазон
                                 start="${BASH_REMATCH[1]}"
@@ -552,6 +553,7 @@ else
                                         ((deleted_count++))
                                     else
                                         # Удалить манифест
+                                        # DELETE возвращает 202 (Accepted) согласно спецификации, но некоторые реестры возвращают 200
                                         delete_code=$(curl -s -o /dev/null -w "%{http_code}" \
                                             -X DELETE \
                                             -u "${REGISTRY_USER}:${REGISTRY_PASS}" \
