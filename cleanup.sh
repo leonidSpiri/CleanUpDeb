@@ -318,7 +318,7 @@ if [[ "$SEARCH_DIR" == "/" ]]; then
     log "  ${CYAN}Верхний уровень (/)${NC}"
     du -h --max-depth=1 / 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
         log "    ${size}\t${dir}"
-    done || true
+    done || true  # Prevent SIGPIPE from head terminating script under set -euo pipefail
     
     # Анализ /var если существует
     if [[ -d /var ]]; then
@@ -326,7 +326,7 @@ if [[ "$SEARCH_DIR" == "/" ]]; then
         log "  ${CYAN}Детализация /var${NC}"
         du -h --max-depth=1 /var 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
             log "    ${size}\t${dir}"
-        done || true
+        done || true  # Prevent SIGPIPE from head terminating script under set -euo pipefail
     fi
     
     # Анализ /home если существует
@@ -335,13 +335,13 @@ if [[ "$SEARCH_DIR" == "/" ]]; then
         log "  ${CYAN}Детализация /home${NC}"
         du -h --max-depth=1 /home 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
             log "    ${size}\t${dir}"
-        done || true
+        done || true  # Prevent SIGPIPE from head terminating script under set -euo pipefail
     fi
 else
     # Если ищем в конкретном каталоге
     du -h --max-depth=1 "$SEARCH_DIR" 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
         log "    ${size}\t${dir}"
-    done || true
+    done || true  # Prevent SIGPIPE from head terminating script under set -euo pipefail
 fi
 
 log ""
@@ -596,7 +596,7 @@ else
         log "  ─────────────────────────────────────────────────"
         docker system df 2>/dev/null | while IFS= read -r line; do
             log "  ${line}"
-        done || true
+        done || true  # Prevent SIGPIPE from docker system df terminating script under set -euo pipefail
         log ""
         
         if ! $DRY_RUN; then
@@ -618,7 +618,7 @@ else
                 log "  ─────────────────────────────────────────────────"
                 docker system df 2>/dev/null | while IFS= read -r line; do
                     log "  ${line}"
-                done || true
+                done || true  # Prevent SIGPIPE from docker system df terminating script under set -euo pipefail
             else
                 log "  ${YELLOW}ℹ Очистка Docker пропущена пользователем.${NC}"
             fi
