@@ -126,10 +126,7 @@ interactive_file_menu() {
     
     # ANSI коды
     local CURSOR_UP='\033[A'
-    local CURSOR_DOWN='\033[B'
     local CLEAR_LINE='\033[2K'
-    local SAVE_CURSOR='\033[s'
-    local RESTORE_CURSOR='\033[u'
     
     # Функция отрисовки меню
     draw_menu() {
