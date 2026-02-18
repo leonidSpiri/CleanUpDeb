@@ -443,10 +443,10 @@ else
                     # Показать список репозиториев
                     log "  ${BOLD}Список образов:${NC}"
                     log "  ─────────────────────────────────────────────────"
-                    local idx=1
+                    idx=1
                     while IFS= read -r repo; do
                         log "  ${idx}. ${repo}"
-                        ((idx++))
+                        idx=$((idx + 1))
                     done <<< "$REPOSITORIES"
                     log ""
                     
@@ -544,13 +544,13 @@ else
                                     
                                     if [[ -z "$digest" ]]; then
                                         log "    ${YELLOW}⚠ ${tag}: не удалось получить digest${NC}"
-                                        ((error_count++))
+                                        error_count=$((error_count + 1))
                                         continue
                                     fi
                                     
                                     if $DRY_RUN; then
                                         log "    ${YELLOW}[dry-run] ${tag} (${digest})${NC}"
-                                        ((deleted_count++))
+                                        deleted_count=$((deleted_count + 1))
                                     else
                                         # Удалить манифест
                                         # DELETE возвращает 202 (Accepted) согласно спецификации, но некоторые реестры возвращают 200
@@ -561,10 +561,10 @@ else
                                         
                                         if [[ "$delete_code" == "202" ]] || [[ "$delete_code" == "200" ]]; then
                                             log "    ${GREEN}✓ ${tag} удалён${NC}"
-                                            ((deleted_count++))
+                                            deleted_count=$((deleted_count + 1))
                                         else
                                             log "    ${RED}✗ ${tag}: ошибка удаления (код ${delete_code})${NC}"
-                                            ((error_count++))
+                                            error_count=$((error_count + 1))
                                         fi
                                     fi
                                 done <<< "$tags"
