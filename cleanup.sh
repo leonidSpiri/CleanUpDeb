@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 #
-# cleanup.sh — лёгкая утилита очистки системы для Debian 13 (Trixie)
+# cleanup.sh — утилита очистки системы для Debian/Ubuntu
+# Версия: 2.0.0
 # Автор: GitHub Copilot
-# Дата:  2026-02-17
+# Дата:  2026-02-18
 #
 # Возможности:
-#   • Поиск крупных файлов (порог настраивается)
-#   • Очистка системного и пользовательского кеша
-#   • Удаление временных файлов
-#   • Очистка apt-кеша, старых ядер, журналов
+#   • Интерактивное удаление крупных файлов (TUI меню)
+#   • Анализ крупных каталогов (du)
+#   • Очистка Docker (локальный + Registry)
+#   • Очистка кеша с исключениями
+#   • Очистка apt-кеша, журналов, временных файлов
 #   • Режим dry-run (по умолчанию — только отчёт)
 #
 # Использование:
@@ -34,6 +36,17 @@ JOURNAL_MAX_AGE="7d"            # хранить журналы не старш�
 SEARCH_DIR="/"                  # где искать крупные файлы
 LOG_FILE="/tmp/cleanup_$(date +%Y%m%d_%H%M%S).log"
 TOTAL_FREED=0
+
+# ─── Исключения для очистки кеша ──────────────────────────
+# Папки внутри ~/.cache, которые НЕ будут очищаться
+CACHE_EXCLUDE_DIRS=(
+    "JetBrains"
+    "Google/chrome"
+    "mozilla/firefox"
+    "Code"
+    "code-server"
+    "JetBrains/RemoteDev"
+)
 
 # ─── Функции-помощники ────────────────────────────────────
 
@@ -98,6 +111,163 @@ check_root() {
     fi
 }
 
+# ─── Интерактивное меню для выбора файлов ─────────────────
+# Функция для интерактивного выбора файлов для удаления
+interactive_file_menu() {
+    local -n files_array=$1  # массив файлов (size<TAB>path)
+    local -a selected_states  # массив состояний (0 - не выбран, 1 - выбран)
+    local current_pos=0
+    local total_files=${#files_array[@]}
+    
+    # Инициализация массива состояний
+    for ((i=0; i<total_files; i++)); do
+        selected_states[$i]=0
+    done
+    
+    # ANSI коды
+    local CURSOR_UP='\033[A'
+    local CLEAR_LINE='\033[2K'
+    
+    # Функция отрисовки меню
+    draw_menu() {
+        echo -e "\r${CLEAR_LINE}  ${BOLD}Выберите файлы для удаления (↑↓ — навигация, пробел — выбор, Enter — подтвердить, q — отмена):${NC}"
+        echo -e "  ─────────────────────────────────────────────────"
+        
+        for ((i=0; i<total_files; i++)); do
+            local file_info="${files_array[$i]}"
+            IFS=$'\t' read -r size path <<< "$file_info"
+            local checkbox="( )"
+            if [[ ${selected_states[$i]} -eq 1 ]]; then
+                checkbox="(*)"
+            fi
+            
+            local marker=" "
+            if [[ $i -eq $current_pos ]]; then
+                marker=">"
+            fi
+            
+            printf "  %s %s %-10s %s\n" "$marker" "$checkbox" "$(human_size "$size")" "$path"
+        done
+    }
+    
+    # Основной цикл
+    while true; do
+        # Очистка области меню
+        for ((i=0; i<=total_files+2; i++)); do
+            echo -e "\r${CLEAR_LINE}"
+        done
+        
+        # Возврат к началу меню
+        for ((i=0; i<=total_files+2; i++)); do
+            echo -ne "${CURSOR_UP}"
+        done
+        
+        draw_menu
+        
+        # Чтение одного символа
+        IFS= read -rsn1 key
+        
+        # Обработка escape-последовательностей для стрелок
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 key
+            case "$key" in
+                '[A') # Стрелка вверх
+                    if ((current_pos > 0)); then
+                        current_pos=$((current_pos - 1))
+                    fi
+                    ;;
+                '[B') # Стрелка вниз
+                    if ((current_pos < total_files - 1)); then
+                        current_pos=$((current_pos + 1))
+                    fi
+                    ;;
+            esac
+        elif [[ "$key" == " " ]]; then
+            # Пробел - переключить выбор
+            if [[ ${selected_states[$current_pos]} -eq 0 ]]; then
+                selected_states[$current_pos]=1
+            else
+                selected_states[$current_pos]=0
+            fi
+        elif [[ "$key" == "" ]]; then
+            # Enter - подтвердить
+            break
+        elif [[ "$key" == "q" ]] || [[ "$key" == "Q" ]]; then
+            # Отмена
+            echo ""
+            echo -e "  ${YELLOW}ℹ Удаление отменено пользователем.${NC}"
+            return 1
+        fi
+    done
+    
+    # Переместить курсор вниз после меню
+    for ((i=0; i<=total_files+2; i++)); do
+        echo ""
+    done
+    
+    # Собрать выбранные файлы
+    local selected_files=()
+    for ((i=0; i<total_files; i++)); do
+        if [[ ${selected_states[$i]} -eq 1 ]]; then
+            selected_files+=("${files_array[$i]}")
+        fi
+    done
+    
+    if [[ ${#selected_files[@]} -eq 0 ]]; then
+        echo -e "  ${YELLOW}ℹ Файлы не выбраны.${NC}"
+        return 1
+    fi
+    
+    # Показать выбранные файлы
+    echo -e "  ${BOLD}Выбрано файлов для удаления: ${#selected_files[@]}${NC}"
+    echo "  ─────────────────────────────────────────────────"
+    for file_info in "${selected_files[@]}"; do
+        IFS=$'\t' read -r size path <<< "$file_info"
+        echo -e "    $(human_size "$size")\t${path}"
+    done
+    echo ""
+    
+    # Запрос подтверждения
+    echo -ne "  ${RED}${BOLD}Вы уверены? Это действие нельзя отменить! (yes/no):${NC} "
+    read -r confirm
+    
+    if [[ "$confirm" != "yes" ]]; then
+        echo -e "  ${YELLOW}ℹ Удаление отменено.${NC}"
+        return 1
+    fi
+    
+    # Удаление файлов
+    local deleted_count=0
+    local deleted_size=0
+    for file_info in "${selected_files[@]}"; do
+        IFS=$'\t' read -r size path <<< "$file_info"
+        
+        if $DRY_RUN; then
+            log "    ${YELLOW}[dry-run] Удаление: ${path}${NC}"
+            deleted_count=$((deleted_count + 1))
+            deleted_size=$((deleted_size + size))
+        else
+            if rm -f "$path" 2>/dev/null; then
+                log "    ${GREEN}✓ Удалён: ${path}${NC}"
+                deleted_count=$((deleted_count + 1))
+                deleted_size=$((deleted_size + size))
+            else
+                log "    ${RED}✗ Ошибка удаления: ${path}${NC}"
+            fi
+        fi
+    done
+    
+    echo ""
+    if $DRY_RUN; then
+        log "  ${YELLOW}[dry-run] Файлов к удалению: ${deleted_count} ($(human_size $deleted_size))${NC}"
+    else
+        TOTAL_FREED=$((TOTAL_FREED + deleted_size))
+        log "  ${GREEN}✓ Удалено файлов: ${deleted_count} ($(human_size $deleted_size))${NC}"
+    fi
+    
+    return 0
+}
+
 # ─── Парсинг аргументов ───────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -138,7 +308,48 @@ DISK_BEFORE=$(df / --output=used -B1 | tail -1 | tr -d ' ')
 # ═══════════════════════════════════════════════════════════
 header "1️⃣  Поиск крупных файлов (≥ ${BIG_FILE_THRESHOLD})"
 
+# --- Анализ крупных каталогов ---
+log ""
+log "  ${BOLD}Крупнейшие каталоги (анализ с помощью du):${NC}"
+log "  ─────────────────────────────────────────────────"
+
+# Анализ верхнего уровня от корня
+if [[ "$SEARCH_DIR" == "/" ]]; then
+    log "  ${CYAN}Верхний уровень (/)${NC}"
+    du -h --max-depth=1 / 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
+        log "    ${size}\t${dir}"
+    done
+    
+    # Анализ /var если существует
+    if [[ -d /var ]]; then
+        log ""
+        log "  ${CYAN}Детализация /var${NC}"
+        du -h --max-depth=1 /var 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
+            log "    ${size}\t${dir}"
+        done
+    fi
+    
+    # Анализ /home если существует
+    if [[ -d /home ]]; then
+        log ""
+        log "  ${CYAN}Детализация /home${NC}"
+        du -h --max-depth=1 /home 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
+            log "    ${size}\t${dir}"
+        done
+    fi
+else
+    # Если ищем в конкретном каталоге
+    du -h --max-depth=1 "$SEARCH_DIR" 2>/dev/null | sort -rh | head -15 | while read -r size dir; do
+        log "    ${size}\t${dir}"
+    done
+fi
+
+log ""
+
+# --- Поиск крупных файлов ---
+log "  ${BOLD}Крупнейшие файлы (≥ ${BIG_FILE_THRESHOLD}):${NC}"
 log "  Поиск в ${SEARCH_DIR} (исключая /proc, /sys, /dev, /run)..."
+log ""
 
 BIG_FILES=$(find "$SEARCH_DIR" \
     -xdev \
@@ -150,14 +361,33 @@ BIG_FILES=$(find "$SEARCH_DIR" \
     | sort -rn | head -30) || true
 
 if [[ -n "$BIG_FILES" ]]; then
-    log ""
     log "  ${BOLD}Топ крупных файлов:${NC}"
     log "  ─────────────────────────────────────────────────"
     while IFS=$'\t' read -r size path; do
         log "  $(human_size "$size")\t${path}"
     done <<< "$BIG_FILES"
     log ""
-    log "  ${YELLOW}ℹ Крупные файлы не удаляются автоматически — проверьте вручную.${NC}"
+    
+    # Интерактивное удаление в режиме apply
+    if ! $DRY_RUN; then
+        echo -ne "  ${BOLD}Хотите удалить некоторые из этих файлов? (y/n):${NC} "
+        read -r do_interactive_delete
+        
+        if [[ "$do_interactive_delete" =~ ^[YyДд]$ ]]; then
+            # Преобразуем BIG_FILES в массив для интерактивного меню
+            declare -a files_array
+            while IFS=$'\t' read -r size path; do
+                files_array+=("${size}"$'\t'"${path}")
+            done <<< "$BIG_FILES"
+            
+            interactive_file_menu files_array
+        else
+            log "  ${YELLOW}ℹ Крупные файлы не удаляются автоматически — проверьте вручную.${NC}"
+        fi
+    else
+        log "  ${YELLOW}ℹ Крупные файлы не удаляются автоматически — проверьте вручную.${NC}"
+        log "  ${YELLOW}  В режиме --apply будет доступно интерактивное удаление.${NC}"
+    fi
 else
     log "  ${GREEN}✓ Крупных файлов не найдено.${NC}"
 fi
@@ -230,6 +460,12 @@ done
 # ═══════════════════════════════════════════════════════════
 header "5️⃣  Очистка пользовательского кеша (~/.cache)"
 
+# Показать исключения
+if [[ ${#CACHE_EXCLUDE_DIRS[@]} -gt 0 ]]; then
+    log "  ${BOLD}Исключённые папки:${NC} ${CACHE_EXCLUDE_DIRS[*]}"
+    log ""
+fi
+
 for user_home in /home/* /root; do
     [[ -d "$user_home/.cache" ]] || continue
     user=$(basename "$user_home")
@@ -243,13 +479,19 @@ for user_home in /home/* /root; do
     log "  ${user}: $(human_size $cache_size)"
 
     if ! $DRY_RUN; then
-        # Удаляем содержимое кеша старше 30 дней (безопасно)
-        old_size=$(find "$user_home/.cache" -mindepth 1 -mtime +30 -type f -printf '%s\n' 2>/dev/null \
+        # Построить аргументы исключения для find
+        exclude_args=()
+        for exc_dir in "${CACHE_EXCLUDE_DIRS[@]}"; do
+            exclude_args+=(-not -path "*/${exc_dir}/*")
+        done
+        
+        # Удаляем содержимое кеша старше 30 дней (безопасно) с исключениями
+        old_size=$(find "$user_home/.cache" -mindepth 1 -mtime +30 -type f "${exclude_args[@]}" -printf '%s\n' 2>/dev/null \
                    | awk '{s+=$1} END {print s+0}')
-        find "$user_home/.cache" -mindepth 1 -mtime +30 -type f -delete 2>/dev/null || true
+        find "$user_home/.cache" -mindepth 1 -mtime +30 -type f "${exclude_args[@]}" -delete 2>/dev/null || true
         find "$user_home/.cache" -mindepth 1 -type d -empty -delete 2>/dev/null || true
         TOTAL_FREED=$((TOTAL_FREED + old_size))
-        log "  ${GREEN}↳ Удалены файлы кеша старше 30 дней.${NC}"
+        log "  ${GREEN}↳ Удалены файлы кеша старше 30 дней (с исключениями).${NC}"
     fi
 done
 
@@ -337,9 +579,66 @@ for user_home in /home/* /root; do
 done
 
 # ═══════════════════════════════════════════════════════════
-# 10. ОЧИСТКА DOCKER REGISTRY V2
+# 10. ОЧИСТКА ЛОКАЛЬНОГО DOCKER
 # ═══════════════════════════════════════════════════════════
-header "🔟 Очистка Docker Registry V2"
+header "🔟 Очистка локального Docker"
+
+# Проверка наличия docker
+if ! command -v docker &>/dev/null; then
+    log "  ${YELLOW}⚠ Docker не установлен. Секция пропущена.${NC}"
+else
+    log "  Проверка использования Docker..."
+    log ""
+    
+    # Показать текущее использование
+    if docker system df &>/dev/null; then
+        log "  ${BOLD}Использование Docker до очистки:${NC}"
+        log "  ─────────────────────────────────────────────────"
+        docker system df 2>/dev/null | while IFS= read -r line; do
+            log "  ${line}"
+        done
+        log ""
+        
+        if ! $DRY_RUN; then
+            echo -ne "  ${BOLD}Выполнить очистку Docker? (y/n):${NC} "
+            read -r do_docker_cleanup
+            
+            if [[ "$do_docker_cleanup" =~ ^[YyДд]$ ]]; then
+                log "  Выполнение очистки Docker..."
+                
+                # Выполняем очистку
+                docker container prune -f &>/dev/null && log "  ${GREEN}✓ Остановленные контейнеры удалены${NC}"
+                docker image prune -a -f &>/dev/null && log "  ${GREEN}✓ Неиспользуемые образы удалены${NC}"
+                docker volume prune -f &>/dev/null && log "  ${GREEN}✓ Неиспользуемые тома удалены${NC}"
+                docker network prune -f &>/dev/null && log "  ${GREEN}✓ Неиспользуемые сети удалены${NC}"
+                docker builder prune -a -f &>/dev/null && log "  ${GREEN}✓ Build cache очищен${NC}"
+                
+                log ""
+                log "  ${BOLD}Использование Docker после очистки:${NC}"
+                log "  ─────────────────────────────────────────────────"
+                docker system df 2>/dev/null | while IFS= read -r line; do
+                    log "  ${line}"
+                done
+            else
+                log "  ${YELLOW}ℹ Очистка Docker пропущена пользователем.${NC}"
+            fi
+        else
+            log "  ${YELLOW}[dry-run] В режиме --apply будут выполнены команды:${NC}"
+            log "  ${YELLOW}  • docker container prune -f${NC}"
+            log "  ${YELLOW}  • docker image prune -a -f${NC}"
+            log "  ${YELLOW}  • docker volume prune -f${NC}"
+            log "  ${YELLOW}  • docker network prune -f${NC}"
+            log "  ${YELLOW}  • docker builder prune -a -f${NC}"
+        fi
+    else
+        log "  ${YELLOW}⚠ Не удалось получить информацию о Docker.${NC}"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════
+# 11. ОЧИСТКА DOCKER REGISTRY V2
+# ═══════════════════════════════════════════════════════════
+header "🔟➊ Очистка Docker Registry V2"
 
 # Проверка наличия curl
 if ! command -v curl &>/dev/null; then
