@@ -337,6 +337,263 @@ for user_home in /home/* /root; do
 done
 
 # ═══════════════════════════════════════════════════════════
+# 10. ОЧИСТКА DOCKER REGISTRY V2
+# ═══════════════════════════════════════════════════════════
+header "🔟 Очистка Docker Registry V2"
+
+# Проверка наличия curl
+if ! command -v curl &>/dev/null; then
+    log "  ${YELLOW}⚠ curl не установлен. Секция пропущена.${NC}"
+    log "  ${YELLOW}  Установите: apt-get install curl${NC}"
+else
+    # Спросить, хочет ли пользователь выполнить очистку реестра
+    echo -n "  Хотите выполнить очистку Docker Registry? (y/n): "
+    read -r do_registry_cleanup
+    
+    if [[ "$do_registry_cleanup" =~ ^[YyДд]$ ]]; then
+        # Запросить URL реестра
+        echo -n "  Введите URL реестра (например, https://registry.example.com): "
+        read -r REGISTRY_URL
+        
+        # Проверка корректности URL
+        if [[ ! "$REGISTRY_URL" =~ ^https?:// ]]; then
+            log "  ${RED}✗ Неверный формат URL. Должен начинаться с http:// или https://${NC}"
+        else
+            # Запросить имя пользователя
+            echo -n "  Введите имя пользователя: "
+            read -r REGISTRY_USER
+            
+            # Запросить пароль (без отображения)
+            echo -n "  Введите пароль: "
+            read -s REGISTRY_PASS
+            echo ""
+            
+            # Проверка доступности реестра
+            log "  Проверка доступности реестра..."
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                -u "${REGISTRY_USER}:${REGISTRY_PASS}" \
+                "${REGISTRY_URL}/v2/" 2>/dev/null || echo "000")
+            
+            if [[ "$HTTP_CODE" != "200" ]]; then
+                if [[ "$HTTP_CODE" == "401" ]]; then
+                    log "  ${RED}✗ Ошибка аутентификации. Проверьте имя пользователя и пароль.${NC}"
+                elif [[ "$HTTP_CODE" == "000" ]]; then
+                    log "  ${RED}✗ Реестр недоступен. Проверьте URL и сетевое соединение.${NC}"
+                else
+                    log "  ${RED}✗ Реестр вернул код ${HTTP_CODE}. Ожидался код 200.${NC}"
+                fi
+            else
+                log "  ${GREEN}✓ Подключение к реестру успешно.${NC}"
+                
+                # Функция для получения всех репозиториев с пагинацией
+                get_all_repositories() {
+                    local url="${REGISTRY_URL}/v2/_catalog"
+                    local all_repos=""
+                    local last=""
+                    
+                    while true; do
+                        local request_url="$url"
+                        if [[ -n "$last" ]]; then
+                            request_url="${url}?n=100&last=${last}"
+                        else
+                            request_url="${url}?n=100"
+                        fi
+                        
+                        local response=$(curl -s -u "${REGISTRY_USER}:${REGISTRY_PASS}" "$request_url" 2>/dev/null)
+                        
+                        # Парсинг JSON (попробуем jq, если нет — используем grep/sed)
+                        if command -v jq &>/dev/null; then
+                            local repos=$(echo "$response" | jq -r '.repositories[]?' 2>/dev/null || true)
+                        else
+                            # Парсинг без jq
+                            local repos=$(echo "$response" | grep -oP '(?<="repositories":\[)[^\]]*' | tr -d '"' | tr ',' '\n' | grep -v '^$' || true)
+                        fi
+                        
+                        if [[ -z "$repos" ]]; then
+                            break
+                        fi
+                        
+                        all_repos="${all_repos}${repos}"$'\n'
+                        
+                        # Получить последний элемент для пагинации
+                        last=$(echo "$repos" | tail -1)
+                        
+                        # Проверить, есть ли ещё страницы (если вернулось меньше 100, то это последняя страница)
+                        local count=$(echo "$repos" | wc -l)
+                        if (( count < 100 )); then
+                            break
+                        fi
+                    done
+                    
+                    echo "$all_repos" | grep -v '^$'
+                }
+                
+                # Получить список всех репозиториев
+                log "  Получение списка образов..."
+                REPOSITORIES=$(get_all_repositories)
+                
+                if [[ -z "$REPOSITORIES" ]]; then
+                    log "  ${YELLOW}ℹ Репозитории не найдены или реестр пуст.${NC}"
+                else
+                    REPO_COUNT=$(echo "$REPOSITORIES" | wc -l)
+                    log "  ${BOLD}Найдено репозиториев: ${REPO_COUNT}${NC}"
+                    log ""
+                    
+                    # Показать список репозиториев
+                    log "  ${BOLD}Список образов:${NC}"
+                    log "  ─────────────────────────────────────────────────"
+                    local idx=1
+                    while IFS= read -r repo; do
+                        log "  ${idx}. ${repo}"
+                        ((idx++))
+                    done <<< "$REPOSITORIES"
+                    log ""
+                    
+                    # Запросить выбор
+                    echo -n "  Удалить ВСЕ образы или выбрать конкретные? (all/select/skip): "
+                    read -r selection_mode
+                    
+                    SELECTED_REPOS=""
+                    
+                    if [[ "$selection_mode" =~ ^[Aa]ll$ ]]; then
+                        SELECTED_REPOS="$REPOSITORIES"
+                        log "  ${YELLOW}⚠ Выбраны ВСЕ образы для удаления.${NC}"
+                    elif [[ "$selection_mode" =~ ^[Ss]elect$ ]]; then
+                        echo -n "  Введите номера образов (например, 1,3,5 или 1-5): "
+                        read -r selection
+                        
+                        # Парсинг выбора
+                        SELECTED_REPOS=""
+                        IFS=',' read -ra PARTS <<< "$selection"
+                        for part in "${PARTS[@]}"; do
+                            part=$(echo "$part" | xargs) # trim whitespace
+                            if [[ "$part" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+                                # Диапазон
+                                start="${BASH_REMATCH[1]}"
+                                end="${BASH_REMATCH[2]}"
+                                for ((i=start; i<=end; i++)); do
+                                    repo=$(echo "$REPOSITORIES" | sed -n "${i}p")
+                                    if [[ -n "$repo" ]]; then
+                                        SELECTED_REPOS="${SELECTED_REPOS}${repo}"$'\n'
+                                    fi
+                                done
+                            elif [[ "$part" =~ ^[0-9]+$ ]]; then
+                                # Одиночный номер
+                                repo=$(echo "$REPOSITORIES" | sed -n "${part}p")
+                                if [[ -n "$repo" ]]; then
+                                    SELECTED_REPOS="${SELECTED_REPOS}${repo}"$'\n'
+                                fi
+                            fi
+                        done
+                        SELECTED_REPOS=$(echo "$SELECTED_REPOS" | grep -v '^$')
+                        
+                        if [[ -z "$SELECTED_REPOS" ]]; then
+                            log "  ${YELLOW}ℹ Образы не выбраны.${NC}"
+                        else
+                            log "  ${BOLD}Выбрано образов: $(echo "$SELECTED_REPOS" | wc -l)${NC}"
+                        fi
+                    else
+                        log "  ${YELLOW}ℹ Очистка реестра пропущена.${NC}"
+                    fi
+                    
+                    # Если есть выбранные репозитории
+                    if [[ -n "$SELECTED_REPOS" ]]; then
+                        log ""
+                        log "  ${BOLD}Образы для удаления:${NC}"
+                        while IFS= read -r repo; do
+                            log "    • ${repo}"
+                        done <<< "$SELECTED_REPOS"
+                        log ""
+                        
+                        # Подтверждение
+                        echo -n "  ${RED}${BOLD}Вы уверены? Это действие нельзя отменить! (yes/no):${NC} "
+                        read -r confirm
+                        
+                        if [[ "$confirm" == "yes" ]]; then
+                            deleted_count=0
+                            error_count=0
+                            
+                            while IFS= read -r repo; do
+                                log "  Обработка: ${CYAN}${repo}${NC}"
+                                
+                                # Получить список тегов
+                                tags_response=$(curl -s -u "${REGISTRY_USER}:${REGISTRY_PASS}" \
+                                    "${REGISTRY_URL}/v2/${repo}/tags/list" 2>/dev/null)
+                                
+                                if command -v jq &>/dev/null; then
+                                    tags=$(echo "$tags_response" | jq -r '.tags[]?' 2>/dev/null || true)
+                                else
+                                    tags=$(echo "$tags_response" | grep -oP '(?<="tags":\[)[^\]]*' | tr -d '"' | tr ',' '\n' | grep -v '^$' || true)
+                                fi
+                                
+                                if [[ -z "$tags" ]]; then
+                                    log "    ${YELLOW}⚠ Теги не найдены${NC}"
+                                    continue
+                                fi
+                                
+                                # Удалить каждый тег
+                                while IFS= read -r tag; do
+                                    [[ -z "$tag" ]] && continue
+                                    
+                                    # Получить digest манифеста
+                                    digest=$(curl -s -I -u "${REGISTRY_USER}:${REGISTRY_PASS}" \
+                                        -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+                                        "${REGISTRY_URL}/v2/${repo}/manifests/${tag}" 2>/dev/null \
+                                        | grep -i "Docker-Content-Digest:" | awk '{print $2}' | tr -d '\r')
+                                    
+                                    if [[ -z "$digest" ]]; then
+                                        log "    ${YELLOW}⚠ ${tag}: не удалось получить digest${NC}"
+                                        ((error_count++))
+                                        continue
+                                    fi
+                                    
+                                    if $DRY_RUN; then
+                                        log "    ${YELLOW}[dry-run] ${tag} (${digest})${NC}"
+                                        ((deleted_count++))
+                                    else
+                                        # Удалить манифест
+                                        delete_code=$(curl -s -o /dev/null -w "%{http_code}" \
+                                            -X DELETE \
+                                            -u "${REGISTRY_USER}:${REGISTRY_PASS}" \
+                                            "${REGISTRY_URL}/v2/${repo}/manifests/${digest}" 2>/dev/null)
+                                        
+                                        if [[ "$delete_code" == "202" ]] || [[ "$delete_code" == "200" ]]; then
+                                            log "    ${GREEN}✓ ${tag} удалён${NC}"
+                                            ((deleted_count++))
+                                        else
+                                            log "    ${RED}✗ ${tag}: ошибка удаления (код ${delete_code})${NC}"
+                                            ((error_count++))
+                                        fi
+                                    fi
+                                done <<< "$tags"
+                                
+                            done <<< "$SELECTED_REPOS"
+                            
+                            log ""
+                            if $DRY_RUN; then
+                                log "  ${YELLOW}[dry-run] Тегов для удаления: ${deleted_count}${NC}"
+                            else
+                                log "  ${GREEN}✓ Удалено тегов: ${deleted_count}${NC}"
+                                if (( error_count > 0 )); then
+                                    log "  ${YELLOW}⚠ Ошибок: ${error_count}${NC}"
+                                fi
+                                log ""
+                                log "  ${YELLOW}ℹ Для освобождения места выполните garbage collection на реестре:${NC}"
+                                log "  ${YELLOW}  docker exec <registry-container> bin/registry garbage-collect /etc/docker/registry/config.yml${NC}"
+                            fi
+                        else
+                            log "  ${YELLOW}ℹ Удаление отменено пользователем.${NC}"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    else
+        log "  ${YELLOW}ℹ Очистка Docker Registry пропущена пользователем.${NC}"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════
 # ИТОГОВЫЙ ОТЧЁТ
 # ═══════════════════════════════════════════════════════════
 DISK_AFTER=$(df / --output=used -B1 | tail -1 | tr -d ' ')
