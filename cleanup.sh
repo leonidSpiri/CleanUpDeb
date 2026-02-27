@@ -121,8 +121,9 @@ interactive_file_menu() {
     # Проверка и установка whiptail (скрипт требует root: check_root() вызывается при старте)
     if ! command -v whiptail &>/dev/null; then
         echo -e "  ${YELLOW}ℹ Устанавливаю whiptail...${NC}"
-        if ! apt-get install -y whiptail 2>/dev/null; then
+        if ! apt-get install -y whiptail >>"$LOG_FILE" 2>&1; then
             echo -e "  ${RED}✗ Не удалось установить whiptail. Интерактивный выбор недоступен.${NC}"
+            echo -e "  ${YELLOW}ℹ Подробности ошибки установки см. в логе: ${LOG_FILE}${NC}"
             return 1
         fi
     fi
