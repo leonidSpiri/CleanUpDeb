@@ -111,113 +111,84 @@ check_root() {
     fi
 }
 
-# ─── Интерактивное меню для выбора файлов ─────────────────
-# Функция для интерактивного выбора файлов для удаления
+# ─── Интерактивное меню для выбора файлов (whiptail TUI) ──
+# Функция для интерактивного выбора файлов для удаления.
+# Подход: сначала берётся топ-50 крупнейших файлов, затем внутри меню
+# предлагается опциональный фильтр по подстроке пути (case-insensitive).
 interactive_file_menu() {
     local -n files_array=$1  # массив файлов (size<TAB>path)
-    local -a selected_states  # массив состояний (0 - не выбран, 1 - выбран)
-    local current_pos=0
-    local total_files=${#files_array[@]}
-    
-    # Инициализация массива состояний
-    for ((i=0; i<total_files; i++)); do
-        selected_states[$i]=0
-    done
-    
-    # ANSI коды
-    local CURSOR_UP='\033[A'
-    local CLEAR_LINE='\033[2K'
-    
-    # Функция отрисовки меню
-    draw_menu() {
-        echo -e "\r${CLEAR_LINE}  ${BOLD}Выберите файлы для удаления (↑↓ — навигация, пробел — выбор, Enter — подтвердить, q — отмена):${NC}"
-        echo -e "  ─────────────────────────────────────────────────"
-        
-        for ((i=0; i<total_files; i++)); do
-            local file_info="${files_array[$i]}"
-            IFS=$'\t' read -r size path <<< "$file_info"
-            local checkbox="( )"
-            if [[ ${selected_states[$i]} -eq 1 ]]; then
-                checkbox="(*)"
-            fi
-            
-            local marker=" "
-            if [[ $i -eq $current_pos ]]; then
-                marker=">"
-            fi
-            
-            printf "  %s %s %-10s %s\n" "$marker" "$checkbox" "$(human_size "$size")" "$path"
-        done
-    }
-    
-    # Основной цикл
-    while true; do
-        # Очистка области меню
-        for ((i=0; i<=total_files+2; i++)); do
-            echo -e "\r${CLEAR_LINE}"
-        done
-        
-        # Возврат к началу меню
-        for ((i=0; i<=total_files+2; i++)); do
-            echo -ne "${CURSOR_UP}"
-        done
-        
-        draw_menu
-        
-        # Чтение одного символа
-        IFS= read -rsn1 key
-        
-        # Обработка escape-последовательностей для стрелок
-        if [[ "$key" == $'\x1b' ]]; then
-            read -rsn2 -t 0.1 key
-            case "$key" in
-                '[A') # Стрелка вверх
-                    if ((current_pos > 0)); then
-                        current_pos=$((current_pos - 1))
-                    fi
-                    ;;
-                '[B') # Стрелка вниз
-                    if ((current_pos < total_files - 1)); then
-                        current_pos=$((current_pos + 1))
-                    fi
-                    ;;
-            esac
-        elif [[ "$key" == " " ]]; then
-            # Пробел - переключить выбор
-            if [[ ${selected_states[$current_pos]} -eq 0 ]]; then
-                selected_states[$current_pos]=1
-            else
-                selected_states[$current_pos]=0
-            fi
-        elif [[ "$key" == "" ]]; then
-            # Enter - подтвердить
-            break
-        elif [[ "$key" == "q" ]] || [[ "$key" == "Q" ]]; then
-            # Отмена
-            echo ""
-            echo -e "  ${YELLOW}ℹ Удаление отменено пользователем.${NC}"
+
+    # Проверка и установка whiptail (скрипт требует root: check_root() вызывается при старте)
+    if ! command -v whiptail &>/dev/null; then
+        echo -e "  ${YELLOW}ℹ Устанавливаю whiptail...${NC}"
+        if ! apt-get install -y whiptail >>"$LOG_FILE" 2>&1; then
+            echo -e "  ${RED}✗ Не удалось установить whiptail. Интерактивный выбор недоступен.${NC}"
+            echo -e "  ${YELLOW}ℹ Подробности ошибки установки см. в логе: ${LOG_FILE}${NC}"
             return 1
         fi
-    done
-    
-    # Переместить курсор вниз после меню
-    for ((i=0; i<=total_files+2; i++)); do
-        echo ""
-    done
-    
-    # Собрать выбранные файлы
-    local selected_files=()
-    for ((i=0; i<total_files; i++)); do
-        if [[ ${selected_states[$i]} -eq 1 ]]; then
-            selected_files+=("${files_array[$i]}")
+    fi
+
+    # Запрос строки фильтра
+    local filter_str
+    filter_str=$(whiptail --title "Фильтр файлов" \
+        --inputbox "Введите строку для фильтрации по пути (пусто — без фильтра):" \
+        10 70 "" 3>&1 1>&2 2>&3) || {
+        echo -e "  ${YELLOW}ℹ Удаление отменено пользователем.${NC}"
+        return 1
+    }
+
+    # Применить фильтр и взять топ-50
+    local -a filtered_files=()
+    for entry in "${files_array[@]}"; do
+        IFS=$'\t' read -r size path <<< "$entry"
+        if [[ -z "$filter_str" ]] || echo "$path" | grep -qiF "$filter_str"; then
+            filtered_files+=("$entry")
+        fi
+        if [[ ${#filtered_files[@]} -ge 50 ]]; then
+            break
         fi
     done
-    
-    if [[ ${#selected_files[@]} -eq 0 ]]; then
+
+    if [[ ${#filtered_files[@]} -eq 0 ]]; then
+        whiptail --title "Файлы не найдены" \
+            --msgbox "По заданному фильтру файлы не найдены." 8 50
+        echo -e "  ${YELLOW}ℹ Файлы не найдены по фильтру.${NC}"
+        return 1
+    fi
+
+    # Построить аргументы для checklist
+    local -a checklist_args=()
+    local idx=0
+    for entry in "${filtered_files[@]}"; do
+        IFS=$'\t' read -r size path <<< "$entry"
+        checklist_args+=("$idx" "$(human_size "$size")  $path" "OFF")
+        idx=$((idx + 1))
+    done
+
+    # Показать checklist
+    local selected_indices
+    selected_indices=$(whiptail --title "Выбор файлов для удаления" \
+        --checklist "Выберите файлы (Пробел — выбор, Enter — подтвердить, Esc — отмена):" \
+        30 100 20 \
+        "${checklist_args[@]}" 3>&1 1>&2 2>&3) || {
+        echo -e "  ${YELLOW}ℹ Удаление отменено пользователем.${NC}"
+        return 1
+    }
+
+    # Убрать кавычки из вывода whiptail; теги — целые числа, пробелов внутри нет
+    selected_indices=$(echo "$selected_indices" | tr -d '"')
+
+    if [[ -z "$selected_indices" ]]; then
         echo -e "  ${YELLOW}ℹ Файлы не выбраны.${NC}"
         return 1
     fi
-    
+
+    # Собрать выбранные файлы
+    local -a selected_files=()
+    for idx in $selected_indices; do
+        selected_files+=("${filtered_files[$idx]}")
+    done
+
     # Показать выбранные файлы
     echo -e "  ${BOLD}Выбрано файлов для удаления: ${#selected_files[@]}${NC}"
     echo "  ─────────────────────────────────────────────────"
@@ -226,22 +197,22 @@ interactive_file_menu() {
         echo -e "    $(human_size "$size")\t${path}"
     done
     echo ""
-    
+
     # Запрос подтверждения
     echo -ne "  ${RED}${BOLD}Вы уверены? Это действие нельзя отменить! (yes/no):${NC} "
     read -r confirm
-    
+
     if [[ "$confirm" != "yes" ]]; then
         echo -e "  ${YELLOW}ℹ Удаление отменено.${NC}"
         return 1
     fi
-    
+
     # Удаление файлов
     local deleted_count=0
     local deleted_size=0
     for file_info in "${selected_files[@]}"; do
         IFS=$'\t' read -r size path <<< "$file_info"
-        
+
         if $DRY_RUN; then
             log "    ${YELLOW}[dry-run] Удаление: ${path}${NC}"
             deleted_count=$((deleted_count + 1))
@@ -256,7 +227,7 @@ interactive_file_menu() {
             fi
         fi
     done
-    
+
     echo ""
     if $DRY_RUN; then
         log "  ${YELLOW}[dry-run] Файлов к удалению: ${deleted_count} ($(human_size $deleted_size))${NC}"
@@ -264,7 +235,7 @@ interactive_file_menu() {
         TOTAL_FREED=$((TOTAL_FREED + deleted_size))
         log "  ${GREEN}✓ Удалено файлов: ${deleted_count} ($(human_size $deleted_size))${NC}"
     fi
-    
+
     return 0
 }
 
@@ -358,7 +329,7 @@ BIG_FILES=$(find "$SEARCH_DIR" \
     -path /dev -prune -o \
     -path /run -prune -o \
     -type f -size "+${BIG_FILE_THRESHOLD}" -printf '%s\t%p\n' 2>/dev/null \
-    | sort -rn | head -30) || true
+    | sort -rn | head -50) || true
 
 if [[ -n "$BIG_FILES" ]]; then
     log "  ${BOLD}Топ крупных файлов:${NC}"
